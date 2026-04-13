@@ -156,45 +156,89 @@ const products = [
     }
 ];
 
-// ===== COOKIE HELPERS =====
-const CookieManager = {
-    set(name, value, days = 30) {
-        const expires = new Date();
-        expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
-        const encodedValue = encodeURIComponent(JSON.stringify(value));
-        document.cookie = `${name}=${encodedValue};expires=${expires.toUTCString()};path=/;SameSite=Lax`;
-    },
+// ===== STORAGE MANAGER (Cookie + localStorage fallback) =====
+const StorageManager = (() => {
+    // Test if cookies are available (they don't work on file:// protocol)
+    function cookiesAvailable() {
+        try {
+            document.cookie = "__cookie_test=1;SameSite=Lax";
+            const hasCookie = document.cookie.indexOf("__cookie_test=") !== -1;
+            document.cookie = "__cookie_test=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;";
+            return hasCookie;
+        } catch {
+            return false;
+        }
+    }
 
-    get(name) {
-        const nameEQ = name + "=";
-        const cookies = document.cookie.split(';');
-        for (let cookie of cookies) {
-            cookie = cookie.trim();
-            if (cookie.indexOf(nameEQ) === 0) {
-                try {
-                    return JSON.parse(decodeURIComponent(cookie.substring(nameEQ.length)));
-                } catch {
-                    return null;
+    const useCookies = cookiesAvailable();
+
+    // Cookie-based storage
+    const cookieStore = {
+        set(name, value, days = 30) {
+            const expires = new Date();
+            expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
+            const encodedValue = encodeURIComponent(JSON.stringify(value));
+            document.cookie = `${name}=${encodedValue};expires=${expires.toUTCString()};path=/;SameSite=Lax`;
+        },
+        get(name) {
+            const nameEQ = name + "=";
+            const cookies = document.cookie.split(';');
+            for (let cookie of cookies) {
+                cookie = cookie.trim();
+                if (cookie.indexOf(nameEQ) === 0) {
+                    try {
+                        return JSON.parse(decodeURIComponent(cookie.substring(nameEQ.length)));
+                    } catch {
+                        return null;
+                    }
                 }
             }
+            return null;
+        },
+        remove(name) {
+            document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;
         }
-        return null;
-    },
+    };
 
-    remove(name) {
-        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;
-    }
-};
+    // localStorage-based fallback
+    const localStore = {
+        set(name, value) {
+            try {
+                localStorage.setItem(name, JSON.stringify(value));
+            } catch {
+                // localStorage full or unavailable
+            }
+        },
+        get(name) {
+            try {
+                const data = localStorage.getItem(name);
+                return data ? JSON.parse(data) : null;
+            } catch {
+                return null;
+            }
+        },
+        remove(name) {
+            try {
+                localStorage.removeItem(name);
+            } catch {
+                // ignore
+            }
+        }
+    };
+
+    console.log(`[Peynir Atölyesi] Depolama yöntemi: ${useCookies ? 'Cookie' : 'localStorage'}`);
+    return useCookies ? cookieStore : localStore;
+})();
 
 // ===== CART CLASS =====
 class ShoppingCart {
     constructor() {
-        this.items = CookieManager.get('cheese_cart') || [];
+        this.items = StorageManager.get('cheese_cart') || [];
         this.listeners = [];
     }
 
     _save() {
-        CookieManager.set('cheese_cart', this.items);
+        StorageManager.set('cheese_cart', this.items);
         this._notify();
     }
 
@@ -645,15 +689,7 @@ document.addEventListener('DOMContentLoaded', () => {
         toast.show('Sepet temizlendi', 'info');
     });
 
-    // Checkout
-    checkoutBtn.addEventListener('click', () => {
-        if (cart.isEmpty()) return;
-        const total = cart.getTotal();
-        const itemCount = cart.getTotalItems();
-        toast.show(`🎉 Siparişiniz alındı! ${itemCount} ürün, toplam ${formatPrice(total)}`, 'success', 5000);
-        cart.clear();
-        closeCart();
-    });
+    // Checkout handler is defined in the auth section below (auth-aware order API)
 
     // ===== PRODUCT MODAL =====
     let modalQuantity = 1;
@@ -783,5 +819,553 @@ document.addEventListener('DOMContentLoaded', () => {
         el.style.transform = 'translateY(24px)';
         el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
         observer.observe(el);
+    });
+
+    // ===== AUTH SYSTEM =====
+    let currentUser = null;
+
+    // Auth DOM elements
+    const authNavButtons = document.getElementById('auth-nav-buttons');
+    const userMenuWrapper = document.getElementById('user-menu-wrapper');
+    const userMenuTrigger = document.getElementById('user-menu-trigger');
+    const userAvatar = document.getElementById('user-avatar');
+    const userDisplayName = document.getElementById('user-display-name');
+    const navLoginBtn = document.getElementById('nav-login-btn');
+    const navRegisterBtn = document.getElementById('nav-register-btn');
+    const dropdownProfile = document.getElementById('dropdown-profile');
+    const dropdownOrders = document.getElementById('dropdown-orders');
+    const dropdownLogout = document.getElementById('dropdown-logout');
+
+    // Auth Modal elements
+    const authModalOverlay = document.getElementById('auth-modal-overlay');
+    const authModal = document.getElementById('auth-modal');
+    const authModalClose = document.getElementById('auth-modal-close');
+    const authTabLogin = document.getElementById('auth-tab-login');
+    const authTabRegister = document.getElementById('auth-tab-register');
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+    const loginError = document.getElementById('login-error');
+    const registerError = document.getElementById('register-error');
+    const switchToRegister = document.getElementById('switch-to-register');
+    const switchToLogin = document.getElementById('switch-to-login');
+
+    // Profile Modal elements
+    const profileModalOverlay = document.getElementById('profile-modal-overlay');
+    const profileModal = document.getElementById('profile-modal');
+    const profileModalClose = document.getElementById('profile-modal-close');
+    const profileModalContent = document.getElementById('profile-modal-content');
+
+    // Orders Modal elements
+    const ordersModalOverlay = document.getElementById('orders-modal-overlay');
+    const ordersModal = document.getElementById('orders-modal');
+    const ordersModalClose = document.getElementById('orders-modal-close');
+    const ordersModalContent = document.getElementById('orders-modal-content');
+
+    // ===== AUTH API HELPERS =====
+    async function apiCall(url, method = 'GET', data = null) {
+        const options = {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin'
+        };
+        if (data) options.body = JSON.stringify(data);
+
+        try {
+            const response = await fetch(url, options);
+            const result = await response.json();
+            return result;
+        } catch (error) {
+            console.error('API Error:', error);
+            return { success: false, message: 'Sunucuya bağlanılamadı. Sunucunun çalıştığından emin olun.' };
+        }
+    }
+
+    // ===== AUTH STATE =====
+    function updateAuthUI() {
+        if (currentUser) {
+            authNavButtons.style.display = 'none';
+            userMenuWrapper.style.display = 'block';
+            userAvatar.textContent = currentUser.first_name.charAt(0).toUpperCase();
+            userDisplayName.textContent = currentUser.first_name;
+        } else {
+            authNavButtons.style.display = '';
+            userMenuWrapper.style.display = 'none';
+        }
+    }
+
+    async function checkAuthState() {
+        const result = await apiCall('/api/user');
+        if (result.success && result.user) {
+            currentUser = result.user;
+        } else {
+            currentUser = null;
+        }
+        updateAuthUI();
+    }
+
+    // Check auth state on page load
+    checkAuthState();
+
+    // ===== AUTH MODAL =====
+    function openAuthModal(tab = 'login') {
+        authModalOverlay.classList.add('active');
+        authModal.classList.add('active');
+
+        if (tab === 'register') {
+            switchTab('register');
+        } else {
+            switchTab('login');
+        }
+
+        document.body.style.overflow = 'hidden';
+        clearAuthErrors();
+    }
+
+    function closeAuthModal() {
+        authModalOverlay.classList.remove('active');
+        authModal.classList.remove('active');
+        document.body.style.overflow = '';
+        clearAuthErrors();
+        loginForm.reset();
+        registerForm.reset();
+    }
+
+    function switchTab(tab) {
+        if (tab === 'login') {
+            authTabLogin.classList.add('active');
+            authTabRegister.classList.remove('active');
+            loginForm.classList.add('active');
+            registerForm.classList.remove('active');
+            document.getElementById('auth-title').textContent = 'Hoş Geldiniz';
+            document.getElementById('auth-subtitle').textContent = 'Peynir Atölyesi hesabınıza giriş yapın';
+        } else {
+            authTabRegister.classList.add('active');
+            authTabLogin.classList.remove('active');
+            registerForm.classList.add('active');
+            loginForm.classList.remove('active');
+            document.getElementById('auth-title').textContent = 'Hesap Oluştur';
+            document.getElementById('auth-subtitle').textContent = 'Peynir Atölyesi\'ne katılın';
+        }
+        clearAuthErrors();
+    }
+
+    function clearAuthErrors() {
+        loginError.classList.remove('visible');
+        loginError.textContent = '';
+        registerError.classList.remove('visible');
+        registerError.textContent = '';
+    }
+
+    function showAuthError(element, message) {
+        element.textContent = message;
+        element.classList.add('visible');
+    }
+
+    // Event listeners
+    navLoginBtn.addEventListener('click', () => openAuthModal('login'));
+    navRegisterBtn.addEventListener('click', () => openAuthModal('register'));
+    authModalClose.addEventListener('click', closeAuthModal);
+    authModalOverlay.addEventListener('click', closeAuthModal);
+    authTabLogin.addEventListener('click', () => switchTab('login'));
+    authTabRegister.addEventListener('click', () => switchTab('register'));
+    switchToRegister.addEventListener('click', (e) => { e.preventDefault(); switchTab('register'); });
+    switchToLogin.addEventListener('click', (e) => { e.preventDefault(); switchTab('login'); });
+
+    // ===== LOGIN FORM =====
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearAuthErrors();
+
+        const email = document.getElementById('login-email').value.trim();
+        const password = document.getElementById('login-password').value;
+        const submitBtn = document.getElementById('login-submit-btn');
+
+        if (!email || !password) {
+            showAuthError(loginError, 'Lütfen tüm alanları doldurun');
+            return;
+        }
+
+        submitBtn.classList.add('loading');
+        submitBtn.querySelector('span').textContent = 'Giriş yapılıyor...';
+
+        const result = await apiCall('/api/login', 'POST', { email, password });
+
+        submitBtn.classList.remove('loading');
+        submitBtn.querySelector('span').textContent = 'Giriş Yap';
+
+        if (result.success) {
+            currentUser = result.user;
+            updateAuthUI();
+            closeAuthModal();
+            toast.show(result.message, 'success');
+        } else {
+            showAuthError(loginError, result.message);
+        }
+    });
+
+    // ===== REGISTER FORM =====
+    registerForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearAuthErrors();
+
+        const first_name = document.getElementById('register-first-name').value.trim();
+        const last_name = document.getElementById('register-last-name').value.trim();
+        const email = document.getElementById('register-email').value.trim();
+        const phone = document.getElementById('register-phone').value.trim();
+        const password = document.getElementById('register-password').value;
+        const passwordConfirm = document.getElementById('register-password-confirm').value;
+        const submitBtn = document.getElementById('register-submit-btn');
+
+        if (!first_name || !last_name || !email || !password) {
+            showAuthError(registerError, 'Lütfen zorunlu alanları doldurun');
+            return;
+        }
+
+        if (password.length < 6) {
+            showAuthError(registerError, 'Şifre en az 6 karakter olmalıdır');
+            return;
+        }
+
+        if (password !== passwordConfirm) {
+            showAuthError(registerError, 'Şifreler eşleşmiyor');
+            return;
+        }
+
+        submitBtn.classList.add('loading');
+        submitBtn.querySelector('span').textContent = 'Kayıt yapılıyor...';
+
+        const result = await apiCall('/api/register', 'POST', {
+            first_name, last_name, email, password, phone
+        });
+
+        submitBtn.classList.remove('loading');
+        submitBtn.querySelector('span').textContent = 'Kayıt Ol';
+
+        if (result.success) {
+            currentUser = result.user;
+            updateAuthUI();
+            closeAuthModal();
+            toast.show(result.message, 'success');
+        } else {
+            showAuthError(registerError, result.message);
+        }
+    });
+
+    // ===== PASSWORD TOGGLE =====
+    document.querySelectorAll('.password-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.dataset.target;
+            const input = document.getElementById(targetId);
+            if (input.type === 'password') {
+                input.type = 'text';
+                btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            } else {
+                input.type = 'password';
+                btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+            }
+        });
+    });
+
+    // ===== USER MENU DROPDOWN =====
+    userMenuTrigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        userMenuWrapper.classList.toggle('open');
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!userMenuWrapper.contains(e.target)) {
+            userMenuWrapper.classList.remove('open');
+        }
+    });
+
+    // ===== LOGOUT =====
+    dropdownLogout.addEventListener('click', async () => {
+        userMenuWrapper.classList.remove('open');
+        const result = await apiCall('/api/logout', 'POST');
+        currentUser = null;
+        updateAuthUI();
+        toast.show('Çıkış yapıldı. Tekrar bekleriz! 🧀', 'info');
+    });
+
+    // ===== PROFILE MODAL =====
+    function openProfileModal() {
+        if (!currentUser) return;
+        userMenuWrapper.classList.remove('open');
+
+        const initials = (currentUser.first_name.charAt(0) + currentUser.last_name.charAt(0)).toUpperCase();
+        const createdDate = currentUser.created_at ? new Date(currentUser.created_at).toLocaleDateString('tr-TR', { year: 'numeric', month: 'long', day: 'numeric' }) : '';
+
+        profileModalContent.innerHTML = `
+            <div class="profile-header">
+                <div class="profile-avatar-large">${initials}</div>
+                <div class="profile-user-info">
+                    <h3>${currentUser.first_name} ${currentUser.last_name}</h3>
+                    <p>${currentUser.email}</p>
+                    ${createdDate ? `<div class="member-since">Üyelik: ${createdDate}</div>` : ''}
+                </div>
+            </div>
+            <div class="profile-tabs">
+                <button class="profile-tab active" data-ptab="info">Bilgilerim</button>
+                <button class="profile-tab" data-ptab="password">Şifre Değiştir</button>
+            </div>
+            <div class="profile-section active" id="profile-info-section">
+                <form class="profile-form" id="profile-info-form">
+                    <div class="auth-form-row">
+                        <div class="auth-form-group">
+                            <label>Ad</label>
+                            <input type="text" id="profile-first-name" value="${currentUser.first_name}" required>
+                        </div>
+                        <div class="auth-form-group">
+                            <label>Soyad</label>
+                            <input type="text" id="profile-last-name" value="${currentUser.last_name}" required>
+                        </div>
+                    </div>
+                    <div class="auth-form-group">
+                        <label>E-posta</label>
+                        <input type="email" value="${currentUser.email}" disabled style="opacity:0.5;">
+                    </div>
+                    <div class="auth-form-group">
+                        <label>Telefon</label>
+                        <input type="tel" id="profile-phone" value="${currentUser.phone || ''}" placeholder="05XX XXX XX XX">
+                    </div>
+                    <div class="auth-form-group">
+                        <label>Adres</label>
+                        <textarea id="profile-address" placeholder="Teslimat adresiniz">${currentUser.address || ''}</textarea>
+                    </div>
+                    <div class="profile-message" id="profile-info-message"></div>
+                    <button type="submit" class="btn btn-primary auth-submit-btn" id="profile-save-btn">
+                        <span>Kaydet</span>
+                    </button>
+                </form>
+            </div>
+            <div class="profile-section" id="profile-password-section">
+                <form class="profile-form" id="profile-password-form">
+                    <div class="auth-form-group">
+                        <label>Mevcut Şifre</label>
+                        <input type="password" id="profile-current-password" placeholder="Mevcut şifreniz" required>
+                    </div>
+                    <div class="auth-form-group">
+                        <label>Yeni Şifre</label>
+                        <input type="password" id="profile-new-password" placeholder="En az 6 karakter" required minlength="6">
+                    </div>
+                    <div class="auth-form-group">
+                        <label>Yeni Şifre Tekrar</label>
+                        <input type="password" id="profile-new-password-confirm" placeholder="Yeni şifrenizi tekrar girin" required>
+                    </div>
+                    <div class="profile-message" id="profile-password-message"></div>
+                    <button type="submit" class="btn btn-primary auth-submit-btn" id="profile-password-btn">
+                        <span>Şifre Güncelle</span>
+                    </button>
+                </form>
+            </div>
+        `;
+
+        // Profile tabs
+        profileModalContent.querySelectorAll('.profile-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                profileModalContent.querySelectorAll('.profile-tab').forEach(t => t.classList.remove('active'));
+                profileModalContent.querySelectorAll('.profile-section').forEach(s => s.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(`profile-${tab.dataset.ptab}-section`).classList.add('active');
+            });
+        });
+
+        // Profile info form
+        document.getElementById('profile-info-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const msgEl = document.getElementById('profile-info-message');
+            msgEl.className = 'profile-message';
+
+            const data = {
+                first_name: document.getElementById('profile-first-name').value.trim(),
+                last_name: document.getElementById('profile-last-name').value.trim(),
+                phone: document.getElementById('profile-phone').value.trim(),
+                address: document.getElementById('profile-address').value.trim()
+            };
+
+            const result = await apiCall('/api/user', 'PUT', data);
+            if (result.success) {
+                currentUser = result.user;
+                updateAuthUI();
+                msgEl.textContent = result.message;
+                msgEl.className = 'profile-message success';
+            } else {
+                msgEl.textContent = result.message;
+                msgEl.className = 'profile-message error';
+            }
+        });
+
+        // Password change form
+        document.getElementById('profile-password-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const msgEl = document.getElementById('profile-password-message');
+            msgEl.className = 'profile-message';
+
+            const current_password = document.getElementById('profile-current-password').value;
+            const new_password = document.getElementById('profile-new-password').value;
+            const confirm = document.getElementById('profile-new-password-confirm').value;
+
+            if (new_password !== confirm) {
+                msgEl.textContent = 'Yeni şifreler eşleşmiyor';
+                msgEl.className = 'profile-message error';
+                return;
+            }
+
+            const result = await apiCall('/api/user/password', 'PUT', { current_password, new_password });
+            if (result.success) {
+                msgEl.textContent = result.message;
+                msgEl.className = 'profile-message success';
+                document.getElementById('profile-password-form').reset();
+            } else {
+                msgEl.textContent = result.message;
+                msgEl.className = 'profile-message error';
+            }
+        });
+
+        profileModalOverlay.classList.add('active');
+        profileModal.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeProfileModal() {
+        profileModalOverlay.classList.remove('active');
+        profileModal.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    dropdownProfile.addEventListener('click', openProfileModal);
+    profileModalClose.addEventListener('click', closeProfileModal);
+    profileModalOverlay.addEventListener('click', closeProfileModal);
+
+    // ===== ORDERS MODAL =====
+    async function openOrdersModal() {
+        if (!currentUser) return;
+        userMenuWrapper.classList.remove('open');
+
+        ordersModalContent.innerHTML = `
+            <div class="orders-modal-header">
+                <h3>📋 Siparişlerim</h3>
+            </div>
+            <div style="text-align:center; padding:32px; color:var(--text-muted);">Yükleniyor...</div>
+        `;
+
+        ordersModalOverlay.classList.add('active');
+        ordersModal.classList.add('active');
+        document.body.style.overflow = 'hidden';
+
+        const result = await apiCall('/api/orders');
+
+        if (result.success && result.orders) {
+            if (result.orders.length === 0) {
+                ordersModalContent.innerHTML = `
+                    <div class="orders-modal-header">
+                        <h3>📋 Siparişlerim</h3>
+                    </div>
+                    <div class="orders-empty">
+                        <div class="orders-empty-icon">📦</div>
+                        <p>Henüz siparişiniz yok</p>
+                        <span>Lezzetli peynirlerimize göz atın!</span>
+                    </div>
+                `;
+            } else {
+                const ordersHTML = result.orders.map(order => {
+                    const itemsHTML = order.items.map(item =>
+                        `<li><span>${item.product_name} x${item.quantity}</span><span>₺${(item.unit_price * item.quantity).toLocaleString('tr-TR')}</span></li>`
+                    ).join('');
+
+                    const date = new Date(order.created_at).toLocaleDateString('tr-TR', {
+                        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                    });
+
+                    const statusLabels = { beklemede: 'Beklemede', hazirlaniyor: 'Hazırlanıyor', tamamlandi: 'Tamamlandı' };
+
+                    return `
+                        <div class="order-card">
+                            <div class="order-card-header">
+                                <span class="order-id">Sipariş #${order.id}</span>
+                                <span class="order-status ${order.status}">${statusLabels[order.status] || order.status}</span>
+                            </div>
+                            <ul class="order-items-list">${itemsHTML}</ul>
+                            <div class="order-card-footer">
+                                <span>${date}</span>
+                                <span class="order-total">₺${order.total_amount.toLocaleString('tr-TR')}</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                ordersModalContent.innerHTML = `
+                    <div class="orders-modal-header">
+                        <h3>📋 Siparişlerim</h3>
+                    </div>
+                    <div class="orders-list">${ordersHTML}</div>
+                `;
+            }
+        } else {
+            ordersModalContent.innerHTML = `
+                <div class="orders-modal-header">
+                    <h3>📋 Siparişlerim</h3>
+                </div>
+                <div class="orders-empty">
+                    <div class="orders-empty-icon">⚠️</div>
+                    <p>Siparişler yüklenemedi</p>
+                    <span>${result.message || 'Bir hata oluştu'}</span>
+                </div>
+            `;
+        }
+    }
+
+    function closeOrdersModal() {
+        ordersModalOverlay.classList.remove('active');
+        ordersModal.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    dropdownOrders.addEventListener('click', openOrdersModal);
+    ordersModalClose.addEventListener('click', closeOrdersModal);
+    ordersModalOverlay.addEventListener('click', closeOrdersModal);
+
+    // ===== CHECKOUT (AUTH-AWARE) =====
+    checkoutBtn.addEventListener('click', async () => {
+        if (cart.isEmpty()) return;
+
+        if (!currentUser) {
+            closeCart();
+            openAuthModal('login');
+            toast.show('Sipariş vermek için giriş yapmanız gerekiyor', 'info');
+            return;
+        }
+
+        const checkoutBtnSpan = checkoutBtn.querySelector('span');
+        checkoutBtnSpan.textContent = 'İşleniyor...';
+        checkoutBtn.classList.add('loading');
+
+        const orderData = {
+            items: cart.items,
+            total_amount: cart.getTotal(),
+            shipping_cost: cart.getShipping()
+        };
+
+        const result = await apiCall('/api/orders', 'POST', orderData);
+
+        checkoutBtnSpan.textContent = 'Siparişi Tamamla';
+        checkoutBtn.classList.remove('loading');
+
+        if (result.success) {
+            toast.show(result.message, 'success', 5000);
+            cart.clear();
+            closeCart();
+        } else {
+            toast.show(result.message || 'Sipariş oluşturulamadı', 'error');
+        }
+    });
+
+    // ===== ESC KEY - close auth modals too =====
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeAuthModal();
+            closeProfileModal();
+            closeOrdersModal();
+        }
     });
 });
